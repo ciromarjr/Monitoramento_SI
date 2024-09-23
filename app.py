@@ -1,10 +1,11 @@
 import streamlit as st
 import sqlite3
 from sqlite3 import Error
-import pandas as pd
 from datetime import datetime, timedelta
 import hashlib
+
 st.set_page_config(layout="wide")
+
 # Função para criar a conexão com o banco de dados SQLite
 def criar_conexao(db_file):
     """Cria a conexão com o banco de dados SQLite"""
@@ -19,7 +20,6 @@ def criar_conexao(db_file):
 def alterar_tabela_sis(conn):
     try:
         cursor = conn.cursor()
-        # Adiciona as novas colunas, caso ainda não existam
         cursor.execute("PRAGMA table_info(sis)")
         columns = [col[1] for col in cursor.fetchall()]
         
@@ -95,17 +95,10 @@ def atualizar_senha(conn, nome, nova_senha):
     cursor.execute("UPDATE usuarios SET senha = ?, primeiro_acesso = 0 WHERE nome = ?", (senha_hash, nome))
     conn.commit()
 
-# Função para permitir a alteração de senha pelo usuário logado
-def alterar_senha(conn, nome, nova_senha):
-    senha_hash = hashlib.sha256(nova_senha.encode()).hexdigest()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE usuarios SET senha = ? WHERE nome = ?", (senha_hash, nome))
-    conn.commit()
-
 # Função para buscar todas as SIs no banco de dados
 def listar_sis_db(conn):
     cur = conn.cursor()
-    cur.execute("SELECT id, titulo, descricao, prazo_final, rm_prazo, mo_prazo, ai_prazo, acordos_prazo, status, IFNULL(responsavel, 'Não atribuído'), roteiro_aprovado, mo_enviada, agentes_que_receberam, data_envio_mo, agentes_de_acordo, data_de_acordo, tipo_si FROM sis")
+    cur.execute("SELECT id, titulo, prazo_final, status, responsavel FROM sis")
     rows = cur.fetchall()
     return rows
 
@@ -146,6 +139,44 @@ def atualizar_responsavel_db(conn, responsavel, si_id):
     cur = conn.cursor()
     cur.execute(sql, (responsavel, si_id))
     conn.commit()
+
+# Função para exibir um card com as informações relevantes e botões de ação
+def exibir_card(conn, id, titulo, prazo_final, status, responsavel, cor_card):
+    st.markdown(f"""
+        <div style='background-color: {cor_card}; padding: 15px; margin-bottom: 10px; border-radius: 10px;'>
+            <h4>ID: {id} - {titulo}</h4>
+            <p><strong>Status:</strong> {status}</p>
+            <p><strong>Prazo Final:</strong> {prazo_final}</p>
+            <p><strong>Responsável:</strong> {responsavel if responsavel else 'Não atribuído'}</p>
+            <div style='text-align: right;'>
+    """, unsafe_allow_html=True)
+    
+    # Botão para Editar
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1:
+        if st.button("Editar", key=f"edit_{id}"):
+            st.session_state.edit_si = (id, titulo, prazo_final, status, responsavel)  # Passar dados para edição
+            st.experimental_rerun()
+
+    # Botão para Atribuir ou Devolver
+    with col2:
+        if responsavel is None or responsavel == 'Não atribuído':
+            if st.button("Atribuir", key=f"assign_{id}"):
+                atualizar_responsavel_db(conn, st.session_state.nome_usuario, id)
+                st.experimental_rerun()
+        else:
+            if responsavel == st.session_state.nome_usuario:
+                if st.button("Devolver", key=f"devolver_{id}"):
+                    atualizar_responsavel_db(conn, None, id)
+                    st.experimental_rerun()
+
+    # Botão para Excluir
+    with col3:
+        if st.button("Excluir", key=f"delete_{id}"):
+            excluir_si_db(conn, id)
+            st.experimental_rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # Função para listar os agentes de acordo com a subestação
 def listar_agentes(subestacao):
@@ -271,84 +302,15 @@ if st.session_state.logged_in and not st.session_state.primeiro_acesso:
         if sis_cadastradas:
             st.subheader("Lista de SIs Cadastradas")
 
-            # Exibir as SIs em uma tabela com cores de prazo
-            df = pd.DataFrame(sis_cadastradas, columns=["ID", "Título", "Descrição", "Prazo Final", "RM Prazo", "MO Prazo", "AI Prazo", "Acordos Prazo", "Status", "Responsável", "Roteiro Aprovado", "MO Enviada", "Agentes que Receberam", "Data de Envio MO", "Agentes de Acordo", "Data de Acordo", "Tipo de SI"])
-
-            # Aplicar cores de acordo com o prazo para as colunas de prazo
-            def apply_color(val):
-                color = cor_prazo(val)
-                return f'background-color: {color}'
-
-            # Aplicar as cores às colunas de prazos
-            styled_df = df.style.applymap(apply_color, subset=["Prazo Final", "RM Prazo", "MO Prazo", "AI Prazo", "Acordos Prazo"])
-
-            # Exibir o dataframe estilizado
-            st.dataframe(styled_df)
-
-            # Adiciona botões de editar, excluir, atribuir e devolver SI
+            # Exibir as SIs como cards coloridos com botões de ação
             for si in sis_cadastradas:
-                col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-                with col1:
-                    if si[9] == st.session_state.nome_usuario or si[9] == 'Não atribuído':  # Permitir editar se for responsável ou sem responsável
-                        if st.button(f"Editar {si[0]}", key=f"edit_{si[0]}"):
-                            st.session_state.edit_si = si  # Armazena os dados da SI a ser editada
-                with col2:
-                    if st.button(f"Excluir {si[0]}", key=f"delete_{si[0]}"):
-                        excluir_si_db(conn, si[0])
-                        st.experimental_rerun()  # Recarrega a página após a exclusão
-                with col3:
-                    if si[9] == 'Não atribuído':  # Permitir atribuir apenas se ainda não tiver responsável
-                        if st.button(f"Atribuir {si[0]}", key=f"assign_{si[0]}"):
-                            atualizar_responsavel_db(conn, st.session_state.nome_usuario, si[0])
-                            st.success(f"Você foi atribuído à SI {si[0]}")
-                            st.experimental_rerun()
-                with col4:
-                    if si[9] == st.session_state.nome_usuario:  # Permitir devolver apenas se o analista logado for o responsável
-                        if st.button(f"Devolver {si[0]}", key=f"devolver_{si[0]}"):
-                            atualizar_responsavel_db(conn, None, si[0])
-                            st.success(f"A SI {si[0]} foi devolvida.")
-                            st.experimental_rerun()
+                id, titulo, prazo_final, status, responsavel = si
 
-            # Se o botão de Editar foi clicado, mostrar o formulário de edição
-            if "edit_si" in st.session_state and st.session_state.edit_si:
-                st.subheader(f"Editar SI: {st.session_state.edit_si[1]}")
+                # Obter a cor do card com base no prazo
+                cor_card = cor_prazo(prazo_final)
 
-                si_to_edit = st.session_state.edit_si
-                id_manual = st.text_input("ID Manual da SI", value=si_to_edit[0], disabled=True)
-                titulo = st.text_input("Título da SI", value=si_to_edit[1])
-                descricao = st.text_area("Descrição da SI", value=si_to_edit[2])
-                prazo_final = st.date_input("Prazo Final da SI", value=datetime.strptime(si_to_edit[3], '%Y-%m-%d').date())
-                
-
-                st.write("### Prazos dos Documentos Necessários")
-                rm_prazo = st.date_input("Prazo do RM (Roteiro de Manobra)", value=datetime.strptime(si_to_edit[4], '%Y-%m-%d').date())
-                mo_prazo = st.date_input("Prazo do MO (Mensagens Operativas)", value=datetime.strptime(si_to_edit[5], '%Y-%m-%d').date())
-                ai_prazo = st.date_input("Prazo do AI (Solicitações de Impedimento)", value=datetime.strptime(si_to_edit[6], '%Y-%m-%d').date())
-                acordos_prazo = st.date_input("Prazo dos Acordos", value=datetime.strptime(si_to_edit[7], '%Y-%m-%d').date())
-
-                roteiro_aprovado = st.selectbox("Roteiro Aprovado?", ["Pendente", "Aprovado"], index=["Pendente", "Aprovado"].index(si_to_edit[10]))
-                mo_enviada = st.selectbox("MO Enviada?", ["Não", "Sim"], index=["Não", "Sim"].index(si_to_edit[11]))
-                data_envio_mo = st.date_input("Data de Envio da MO", value=datetime.strptime(si_to_edit[13], '%Y-%m-%d').date())
-                # Adiciona verificação para garantir que a subestação esteja na lista
-                subestacao_valida = si_to_edit[15] if si_to_edit[15] in ["SDM", "ACT", "ARI2", "ARN"] else "SDM"
-                subestacao = st.selectbox("Subestação", ["SDM", "ACT", "ARI2", "ARN"], index=["SDM", "ACT", "ARI2", "ARN"].index(subestacao_valida))
-                agentes_de_acordo = st.selectbox("Todos os Agentes Deram o de Acordo?", ["Não", "Sim"], index=["Não", "Sim"].index(si_to_edit[14]))
-                data_de_acordo = st.date_input("Data de Recebimento dos Acordos", value=datetime.strptime(si_to_edit[15], '%Y-%m-%d').date(),key="data_de_acordo_edit")
-                
-
-                tipo_si = st.selectbox("Tipo de SI", ["Normal", "Solicitação de Acesso Provisório"], index=["Normal", "Solicitação de Acesso Provisório"].index(si_to_edit[16]))
-
-                status = st.selectbox("Status", ["Em Análise", "Pendente", "Aprovado", "Necessita Correção"], index=["Em Análise", "Pendente", "Aprovado", "Necessita Correção"].index(si_to_edit[8]))
-
-                if st.button("Salvar Alterações"):
-                    editar_si_db(conn, (titulo, descricao, prazo_final, rm_prazo, mo_prazo, ai_prazo, acordos_prazo, status, si_to_edit[9], roteiro_aprovado, mo_enviada, ",".join(agentes_de_acordo), data_envio_mo, agentes_de_acordo, data_de_acordo, tipo_si, id_manual))
-                    st.session_state.edit_si = None  # Limpa o estado de edição
-                    st.experimental_rerun()
-
-                if st.button("Cancelar Edição"):
-                    st.session_state.edit_si = None
-                    st.experimental_rerun()
-
+                # Exibir o card com as informações relevantes e os botões
+                exibir_card(conn, id, titulo, prazo_final, status, responsavel, cor_card)
         else:
             st.write("Nenhuma SI cadastrada ainda.")
 
